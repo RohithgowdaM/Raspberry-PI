@@ -6,7 +6,7 @@ from tkinter import *
 def CaptureImage():
     print("Capturing Image:")
     # Use subprocess to call libcamera-still
-    result = subprocess.run(['libcamera-still', '-o', '/home/Gowda/pictures/testimage.jpg'])
+    result = subprocess.run(['libcamera-still', '-o', 'testimage.jpg'])
     if result.returncode == 0:
         print("Image captured successfully")
     else:
@@ -20,7 +20,7 @@ def SendNotification():
     # Replace with your actual Pushbullet API key
     pb = Pushbullet("o.uHNqiT66XGLVc50DxBoyUf9DQILCfdfr")
     
-    with open('/home/Gowda/pictures/testimage.jpg', 'rb') as pic:
+    with open('testimage.jpg', 'rb') as pic:
         file_data = pb.upload_file(pic, "Picture.jpg")
         push = pb.push_file(**file_data)
         
