@@ -1,6 +1,5 @@
 import RPi.GPIO as GPIO
 import time
-import serial
 import requests
 from datetime import datetime
 import pytz
@@ -11,18 +10,17 @@ beta1 = 0.6
 beta2 = 0.4
 beta3 = 2.5
 beta4 = 0.3
-flow_rate = 27.78  # Average flow rate in ml/s (pesticide pump)
-total_volume = 10.0  # Total water volume in ml
+total_volume = 10.0  # Total pesticide volume in ml
 
-# GPIO pin for serial communication
-TX_PIN = 14  # GPIO 14 (TX)
+# Motor capacity
+motor_capacity_lph = 105.0  # Motor capacity in liters per hour
 
-# Serial communication setup
-ser = serial.Serial("/dev/serial0", 9600)  # Serial port for communication with Arduino
+# GPIO pin for controlling the motor
+MOTOR_PIN = 18  # Using GPIO 18 instead of TX
 
 # GPIO setup
 GPIO.setmode(GPIO.BCM)
-GPIO.setup(TX_PIN, GPIO.OUT)
+GPIO.setup(MOTOR_PIN, GPIO.OUT)
 
 # Weather API Functions
 def get_current_datetime():
@@ -78,6 +76,14 @@ def calculate_pesticide_amount(precipitation, temperature, disease=1, age=5):
     pesticide_amount = alpha + (beta1 * precipitation) + (beta2 * temperature) + (beta3 * disease) + (beta4 * age)
     return min(pesticide_amount, total_volume)
 
+def pump_pesticide(pesticide_amount):
+    # Calculate the duration to run the pump based on the pesticide amount
+    pump_time_seconds = (pesticide_amount / (motor_capacity_lph * 1000 / 3600))
+    GPIO.output(MOTOR_PIN, GPIO.LOW)
+    time.sleep(pump_time_seconds)
+    GPIO.output(MOTOR_PIN, GPIO.HIGH)
+    print(f"Pumped {pesticide_amount} ml of pesticide over {pump_time_seconds:.2f} seconds.")
+
 def main():
     username = "none_n_swarna"
     password = "cXs0E3e2LQ"
@@ -99,10 +105,9 @@ def main():
 
                 pesticide_amount = calculate_pesticide_amount(precipitation, temperature)
 
-                # Send pesticide amount to Arduino
-                ser.write(f"{pesticide_amount}\n".encode('utf-8'))
-                print(f"Pesticide Amount Sent: {pesticide_amount} ml")
-
+                while True:
+                    pump_pesticide(pesticide_amount)
+                    time.sleep(20)  # 20-second interval between cycles
     else:
         print("Failed to retrieve location data.")
 
@@ -111,4 +116,3 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         GPIO.cleanup()
-        ser.close()
