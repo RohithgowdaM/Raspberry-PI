@@ -1,63 +1,114 @@
 import RPi.GPIO as GPIO
 import time
 import requests
+import subprocess
+import numpy as np
+import tensorflow as tf
 from datetime import datetime
 import pytz
-from picamera import PiCamera
-from PIL import Image
-import torch
-import torchvision.transforms as transforms
+from pushbullet import Pushbullet
 
 # Constants for pesticide calculation
 alpha = 1.5
 beta1 = 0.6
 beta2 = 0.4
-beta3 = 2.5  # This will be replaced with model prediction
+beta3 = 2.5
 beta4 = 0.3
 total_volume = 10.0  # Total pesticide volume in ml
-
-# Motor capacity
 motor_capacity_lph = 105.0  # Motor capacity in liters per hour
 
+# Extra pesticide amount based on model predictions
+EXTRA_PESTICIDE_PER_DISEASE = {
+    "Tomato Septoria leaf spot": 0.5,
+    "Tomato mosaic virus": 0.7,
+    "Tomato Late blight": 0.6,
+    "Tomato Spider mites (Two-spotted spider mite)": 0.4,
+    "Tomato Yellow Leaf Curl Virus": 0.5,
+    "default": 0.3
+}
+
+class_labels = [
+    "Tomato Septoria leaf spot", "Tomato mosaic virus", "Tomato Late blight", 
+    "Tomato Spider mites (Two-spotted spider mite)", "Tomato Yellow Leaf Curl Virus", 
+    "Tomato healthy", "Pepper bell Bacterial spot", "Potato healthy", 
+    "Tomato Target Spot", "Tomato Leaf Mold", "Tomato Bacterial spot", 
+    "Tomato Early blight", "Potato Late blight", "Potato Early blight", 
+    "Pepper bell healthy"
+]
+
 # GPIO pin for controlling the motor
-MOTOR_PIN = 18  # Using GPIO 18 instead of TX
+MOTOR_PIN = 18
 
 # GPIO setup
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(MOTOR_PIN, GPIO.OUT)
 
-# Camera setup
-camera = PiCamera()
-camera.resolution = (1024, 768)
+def capture_image():
+    """Capture image from camera."""
+    print("Capturing Image:")
+    result = subprocess.run(['libcamera-still', '-o', 'testimage.jpg'])
+    if result.returncode == 0:
+        print("Image captured successfully")
+        return 'testimage.jpg'
+    else:
+        print("Failed to capture image")
+        return None
 
-# Machine Learning Model setup (Assuming PyTorch model for plant disease detection)
-model_path = "plant_disease_model.pth"
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Load the pre-trained model
 def load_model():
-    model = torch.load(model_path, map_location=device)
-    model.eval()  # Set the model to evaluation mode
-    return model
+    """Load TFLite model."""
+    interpreter = tf.lite.Interpreter(model_path="model.tflite")
+    interpreter.allocate_tensors()
+    return interpreter
 
-# Preprocess the image before feeding into the model
-def preprocess_image(image_path):
-    transform = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-    image = Image.open(image_path)
-    return transform(image).unsqueeze(0).to(device)
+def predict_disease(interpreter, image_path):
+    """Run model inference to predict plant disease."""
+    img = tf.io.read_file(image_path)
+    img = tf.image.decode_jpeg(img, channels=3)
+    img = tf.image.resize(img, [224, 224])  # Assuming the model input size
+    img = tf.cast(img, tf.float32) / 255.0
+    img = np.expand_dims(img, axis=0)
 
-# Predict disease using the pre-trained model
-def predict_disease(model, image_tensor):
-    with torch.no_grad():
-        output = model(image_tensor)
-        _, predicted = torch.max(output, 1)
-        return predicted.item()  # Returning the predicted class
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
 
-# Weather API Functions
+    interpreter.set_tensor(input_details[0]['index'], img)
+    interpreter.invoke()
+
+    output_data = interpreter.get_tensor(output_details[0]['index'])[0]
+    predicted_index = np.argmax(output_data)
+    predicted_class = class_labels[predicted_index]
+    probability = output_data[predicted_index]
+
+    return predicted_class, probability
+
+def calculate_base_pesticide_amount(precipitation, temperature, disease=1, age=5):
+    """Calculate base pesticide amount based on weather data."""
+    return alpha + (beta1 * precipitation) + (beta2 * temperature) + (beta3 * disease) + (beta4 * age)
+
+def calculate_total_pesticide_amount(base_amount, disease_class, probability):
+    """Calculate total pesticide amount based on model predictions."""
+    if probability >= 0.7:
+        extra_amount = EXTRA_PESTICIDE_PER_DISEASE.get(disease_class, EXTRA_PESTICIDE_PER_DISEASE["default"])
+        return min(base_amount + extra_amount, total_volume)
+    else:
+        return base_amount
+
+def pump_pesticide(amount):
+    """Activate motor to pump the calculated amount of pesticide."""
+    runtime = (amount / motor_capacity_lph) * 3600  # Convert liters/hour to seconds
+    print(f"Pumping pesticide for {runtime:.2f} seconds")
+    GPIO.output(MOTOR_PIN, GPIO.HIGH)
+    time.sleep(runtime)
+    GPIO.output(MOTOR_PIN, GPIO.LOW)
+    print("Pumping complete.")
+
+def send_notification():
+    """Send a notification with the image via Pushbullet."""
+    pb = Pushbullet("o.uHNqiT66XGLVc50DxBoyUf9DQILCfdfr")
+    with open('testimage.jpg', 'rb') as pic:
+        file_data = pb.upload_file(pic, "Plant Picture.jpg")
+        pb.push_file(**file_data)
+
 def get_current_datetime():
     utc_now = datetime.now(pytz.utc)
     return utc_now.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -84,7 +135,7 @@ def get_weather_data(username, password, datetime_iso, latitude, longitude):
     endpoint = f"https://api.meteomatics.com/{datetime_iso}/{parameters}/{location}/json"
 
     try:
-        response = requests.get(endpoint, auth=(username, password))
+        response = requests.get(endpoint, auth=(username, password), timeout=5)
         if response.status_code == 200:
             return response.json()
         else:
@@ -107,61 +158,57 @@ def parse_weather_data(data):
         print(f"Error parsing weather data: {e}")
         return None
 
-def calculate_pesticide_amount(precipitation, temperature, disease=1, age=5):
-    pesticide_amount = alpha + (beta1 * precipitation) + (beta2 * temperature) + (beta3 * disease) + (beta4 * age)
-    return min(pesticide_amount, total_volume)
-
-def pump_pesticide(pesticide_amount):
-    # Calculate the duration to run the pump based on the pesticide amount
-    pump_time_seconds = (pesticide_amount / (motor_capacity_lph * 1000 / 3600))
-    GPIO.output(MOTOR_PIN, GPIO.LOW)
-    time.sleep(pump_time_seconds)
-    GPIO.output(MOTOR_PIN, GPIO.HIGH)
-    print(f"Pumped {pesticide_amount} ml of pesticide over {pump_time_seconds:.2f} seconds.")
-
 def main():
     username = "none_n_swarna"
     password = "cXs0E3e2LQ"
 
-    datetime_iso = get_current_datetime()
-    location_data = get_current_location()
+    # Load the model
+    interpreter = load_model()
 
-    if location_data:
-        latitude = location_data['latitude']
-        longitude = location_data['longitude']
+    while True:
+        # Get the current datetime and location
+        datetime_iso = get_current_datetime()
+        location_data = get_current_location()
 
-        raw_weather_data = get_weather_data(username, password, datetime_iso, latitude, longitude)
+        if location_data:
+            latitude = location_data['latitude']
+            longitude = location_data['longitude']
 
-        if raw_weather_data:
-            weather_info = parse_weather_data(raw_weather_data)
-            if weather_info:
-                temperature = weather_info.get('t_2m:C')
-                precipitation = weather_info.get('precip_1h:mm')
+            # Fetch weather data
+            raw_weather_data = get_weather_data(username, password, datetime_iso, latitude, longitude)
+            if raw_weather_data:
+                weather_info = parse_weather_data(raw_weather_data)
+                if weather_info:
+                    temperature = float(weather_info.get('t_2m:C', 25))  # Default to 25°C if not available
+                    precipitation = float(weather_info.get('precip_1h:mm', 0))  # Default to 0 mm if not available
+                    base_pesticide_amount = calculate_base_pesticide_amount(precipitation, temperature)
 
-                # Capture an image using the PiCamera
-                image_path = "/home/pi/captured_image.jpg"
-                camera.capture(image_path)
-                print("Image captured.")
+                    # Capture image
+                    image_path = capture_image()
+                    if image_path:
+                        # Predict disease
+                        disease_class, probability = predict_disease(interpreter, image_path)
+                        print(f"Detected: {disease_class} with probability {probability:.2f}")
 
-                # Load the machine learning model
-                model = load_model()
+                        # Calculate total pesticide amount
+                        total_pesticide_amount = calculate_total_pesticide_amount(base_pesticide_amount, disease_class, probability)
+                        print(f"Total Pesticide Amount: {total_pesticide_amount} ml")
 
-                # Preprocess the captured image and predict the disease level
-                image_tensor = preprocess_image(image_path)
-                disease = predict_disease(model, image_tensor)
-                print(f"Disease detected: {disease}")
+                        # Pump pesticide
+                        pump_pesticide(total_pesticide_amount)
 
-                # Calculate the pesticide amount based on the weather and disease
-                pesticide_amount = calculate_pesticide_amount(precipitation, temperature, disease)
+                        # Send image and notification
+                        send_notification()
+            
+        else:
+            print("Failed to retrieve location data.")
 
-                while True:
-                    pump_pesticide(pesticide_amount)
-                    time.sleep(20)  # 20-second interval between cycles
-    else:
-        print("Failed to retrieve location data.")
+        # Wait for 20 seconds before the next cycle
+        time.sleep(20)
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         GPIO.cleanup()
+        print("Program terminated.")
