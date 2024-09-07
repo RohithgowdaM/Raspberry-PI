@@ -1,0 +1,1 @@
+OK so listen, i have a model model.tflite of plant disease detection which detects whether the plant has disease or not, so the process goes like this in the while loop, first it captures the 
