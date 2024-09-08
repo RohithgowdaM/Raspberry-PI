@@ -15,7 +15,7 @@ beta2 = 0.4
 beta3 = 2.5
 beta4 = 0.3
 total_volume = 10.0  # Total pesticide volume in ml
-motor_capacity_lph = 105.0  # Motor capacity in liters per hour
+motor_capacity_lph = 3600.0  # Motor capacity in liters per hour
 
 # Extra pesticide amount based on model predictions
 EXTRA_PESTICIDE_PER_DISEASE = {
@@ -64,7 +64,7 @@ def predict_disease(interpreter, image_path):
     """Run model inference to predict plant disease."""
     img = tf.io.read_file(image_path)
     img = tf.image.decode_jpeg(img, channels=3)
-    img = tf.image.resize(img, [256, 256])  # Changed size to 256x256
+    img = tf.image.resize(img, [256, 256])
     img = tf.cast(img, tf.float32) / 255.0
     img = np.expand_dims(img, axis=0)
 
@@ -165,46 +165,53 @@ def main():
     # Load the model
     interpreter = load_model()
 
-    while True:
-        # Get the current datetime and location
-        datetime_iso = get_current_datetime()
-        location_data = get_current_location()
+    # Get the current datetime and location
+    datetime_iso = get_current_datetime()
+    location_data = get_current_location()
 
-        if location_data:
-            latitude = location_data['latitude']
-            longitude = location_data['longitude']
+    # Fetch weather data once
+    if location_data:
+        latitude = location_data['latitude']
+        longitude = location_data['longitude']
 
-            # Fetch weather data
-            raw_weather_data = get_weather_data(username, password, datetime_iso, latitude, longitude)
-            if raw_weather_data:
-                weather_info = parse_weather_data(raw_weather_data)
-                if weather_info:
-                    temperature = float(weather_info.get('t_2m:C', 25))  # Default to 25°C if not available
-                    precipitation = float(weather_info.get('precip_1h:mm', 0))  # Default to 0 mm if not available
-                    base_pesticide_amount = calculate_base_pesticide_amount(precipitation, temperature)
-
-                    # Capture image
-                    image_path = capture_image()
-                    if image_path:
-                        # Predict disease
-                        disease_class, probability = predict_disease(interpreter, image_path)
-                        print(f"Detected: {disease_class} with probability {probability:.2f}")
-
-                        # Calculate total pesticide amount
-                        total_pesticide_amount = calculate_total_pesticide_amount(base_pesticide_amount, disease_class, probability)
-                        print(f"Total Pesticide Amount: {total_pesticide_amount} ml")
-
-                        # Pump pesticide
-                        pump_pesticide(total_pesticide_amount)
-
-                        # Send image and notification
-                        send_notification()
-            
+        raw_weather_data = get_weather_data(username, password, datetime_iso, latitude, longitude)
+        if raw_weather_data:
+            weather_info = parse_weather_data(raw_weather_data)
+            if weather_info:
+                temperature = float(weather_info.get('t_2m:C', 25))  # Default to 25°C
+                precipitation = float(weather_info.get('precip_1h:mm', 0))  # Default to 0 mm
+            else:
+                temperature = 25.0  # Hardcoded fallback temperature
+                precipitation = 0.0  # Hardcoded fallback precipitation
         else:
-            print("Failed to retrieve location data.")
+            temperature = 25.0  # Hardcoded fallback temperature
+            precipitation = 0.0  # Hardcoded fallback precipitation
 
-        # Wait for 20 seconds before the next cycle
-        time.sleep(20)
+        base_pesticide_amount = calculate_base_pesticide_amount(precipitation, temperature)
+
+        while True:
+            # Capture image
+            image_path = capture_image()
+            if image_path:
+                # Predict disease
+                disease_class, probability = predict_disease(interpreter, image_path)
+                print(f"Detected: {disease_class} with probability {probability:.2f}")
+
+                # Calculate total pesticide amount
+                total_pesticide_amount = calculate_total_pesticide_amount(base_pesticide_amount, disease_class, probability)
+                print(f"Total Pesticide Amount: {total_pesticide_amount} ml")
+
+                # Pump pesticide
+                pump_pesticide(total_pesticide_amount)
+
+                # Send image and notification
+                send_notification()
+
+            # Wait for 20 seconds before the next cycle
+            time.sleep(20)
+
+    else:
+        print("Failed to retrieve location data.")
 
 if __name__ == "__main__":
     try:
